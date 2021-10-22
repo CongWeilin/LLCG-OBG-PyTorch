@@ -5,7 +5,7 @@ from ogb.nodeproppred import PygNodePropPredDataset, Evaluator
 import torch
 import torch_geometric.transforms as T
 
-from .get_graph_partitions import get_graph_partitions, get_train_node_per_part, _neighbor_approx
+from .get_graph_partitions import get_graph_partitions, get_train_node_per_part, neighbor_approx
 from .get_label_partitions import get_label_partitions
 
 def load_dataset(dataset_name, num_parts, 
@@ -35,7 +35,19 @@ def load_dataset(dataset_name, num_parts,
                                      num_clusters = num_parts, 
                                      data = data, 
                                      root = os.getcwd())
-        parts = [neighbor_approx(part) for part in parts]
+        
+        # convert PyG data structure to scipy's sparse_coo for metis partition
+        import numpy as np
+        from scipy.sparse import csr_matrix
+        
+        row = data.adj_t.storage.row().numpy()
+        col = data.adj_t.storage.col().numpy()
+        num_nodes = data.adj_t.size(0)
+
+        all_nodes = np.arange(num_nodes)
+        sparse_coo_adj = csr_matrix((np.ones_like(row), (row, col)), shape=(num_nodes, num_nodes))
+        
+        parts = [neighbor_approx(sparse_coo_adj, part) for part in parts]
     else:
         print('Unknown partition method')
     

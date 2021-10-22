@@ -87,15 +87,19 @@ def _partition_graph(adj, idx_nodes, num_clusters):
 def neighbor_approx(adj, idx_nodes, sample_ratio=0.1):
     adj_part = adj[idx_nodes, :]
     part_neighbors_prob = np.sum(adj_part, axis=0)
-    part_neighbors_prob = part_neighbors_prob/np.sum(part_neighbors_prob)
+    part_neighbors_prob = np.array(part_neighbors_prob/np.sum(part_neighbors_prob))
+    part_neighbors_prob = np.reshape(part_neighbors_prob, -1)
     
     one_hop_neighbors = np.sum(part_neighbors_prob>0)
     sample_node_size = int(len(part_neighbors_prob)*sample_ratio)
     
     if sample_node_size < one_hop_neighbors:
-        overhead = np.random.choice(len(part_neighbors_prob), p=part_neighbors_prob, replace=False)
+        overhead = np.random.choice(len(part_neighbors_prob), sample_node_size,
+                                    p=part_neighbors_prob, replace=False)
     else:
         overhead = one_hop_neighbors
         
-    new_idx_nodes = np.sort(np.concatenate([idx_nodes, overhead]))
-    return overhead
+    new_idx_nodes = np.unique(np.concatenate([np.array(idx_nodes).reshape(-1), 
+                                              np.array(overhead).reshape(-1)]))
+                             
+    return new_idx_nodes
