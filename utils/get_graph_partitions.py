@@ -99,7 +99,12 @@ def neighbor_approx(adj, idx_nodes, sample_ratio=0.1):
     else:
         overhead = one_hop_neighbors
         
-    new_idx_nodes = np.unique(np.concatenate([np.array(idx_nodes).reshape(-1), 
-                                              np.array(overhead).reshape(-1)]))
-                             
+    idx_nodes = np.array(idx_nodes).reshape(-1)
+    overhead  = np.array(overhead).reshape(-1)
+    
+    new_idx_nodes = np.unique(np.concatenate([idx_nodes, overhead]))
+    overhead      = np.setdiff1d(new_idx_nodes, idx_nodes)
+    
+    new_idx_nodes = np.concatenate([idx_nodes, overhead])
+        
     return new_idx_nodes

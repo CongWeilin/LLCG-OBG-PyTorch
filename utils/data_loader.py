@@ -17,7 +17,7 @@ def load_dataset(dataset_name, num_parts,
     split_idx = dataset.get_idx_split()
     
     # Create local partitions
-    if partition_method == 0: # use metis based on graph structure
+    if partition_method == 0 or 2: # use metis based on graph structure
         print('Partition with metis based on graph structure')
         parts = get_graph_partitions(dataset      = dataset_name, 
                                      num_clusters = num_parts, 
@@ -29,13 +29,13 @@ def load_dataset(dataset_name, num_parts,
                                      num_clusters = num_parts, 
                                      data = data, 
                                      root = os.getcwd())
-    elif partition_method == 2: # use metis based on graph structure + overhead
-        print('Partition with metis based on graph structure + overhead')
-        parts = get_graph_partitions(dataset      = dataset_name, 
-                                     num_clusters = num_parts, 
-                                     data = data, 
-                                     root = os.getcwd())
-        
+    else:
+        print('Unknown partition method')
+    
+    train_parts = get_train_node_per_part(num_nodes   = data.x.size(0),
+                                          train_nodes = split_idx['train'].numpy(), 
+                                          parts       = parts)
+    if partition_method == 2:
         # convert PyG data structure to scipy's sparse_coo for metis partition
         import numpy as np
         from scipy.sparse import csr_matrix
@@ -47,15 +47,11 @@ def load_dataset(dataset_name, num_parts,
         all_nodes = np.arange(num_nodes)
         sparse_coo_adj = csr_matrix((np.ones_like(row), (row, col)), shape=(num_nodes, num_nodes))
         
-        parts = [neighbor_approx(sparse_coo_adj, part) for part in parts]
+        parts_with_approx = [neighbor_approx(sparse_coo_adj, part) for part in parts]
+        
+        data.parts = [torch.tensor(part) for part in parts_with_approx]
     else:
-        print('Unknown partition method')
-    
-    train_parts = get_train_node_per_part(num_nodes   = data.x.size(0),
-                                          train_nodes = split_idx['train'].numpy(), 
-                                          parts       = parts)
-
-    data.parts = [torch.tensor(part) for part in parts]
+        data.parts = [torch.tensor(part) for part in parts]
     data.train_parts = [torch.tensor(part) for part in train_parts]
     
     # add eval
