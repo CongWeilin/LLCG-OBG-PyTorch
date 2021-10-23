@@ -3,208 +3,27 @@ import time
 import glob
 import argparse
 import os.path as osp
+
+import numpy as np
 from tqdm import tqdm
 
 from typing import Optional, List, NamedTuple
 
 import torch
-from torch import Tensor
 import torch.nn.functional as F
-from torch.nn import ModuleList, Sequential, Linear, BatchNorm1d, ReLU, Dropout
-from torch.optim.lr_scheduler import StepLR
 
-from pytorch_lightning.metrics import Accuracy
 from pytorch_lightning.callbacks import ModelCheckpoint
-from pytorch_lightning import (LightningDataModule, LightningModule, Trainer,
-                               seed_everything)
+from pytorch_lightning import Trainer, seed_everything
 
-from torch_sparse import SparseTensor
-from torch_geometric.nn import SAGEConv, GATConv
-from torch_geometric.data import NeighborSampler
+from ogb.lsc import MAG240MEvaluator
 
-from ogb.lsc import MAG240MDataset, MAG240MEvaluator
-import numpy as np
 
-from utils.get_smaller_graph import print_dataset_stat, get_part_adjs, get_part_feats, get_part_nodes_split
-
+from utils.data_loader import MAG240M
+from model.gnn import GNN
 ROOT = './dataset'
 
 
-class Batch(NamedTuple):
-    x: Tensor
-    y: Tensor
-    adjs_t: List[SparseTensor]
-
-    def to(self, *args, **kwargs):
-        return Batch(
-            x=self.x.to(*args, **kwargs),
-            y=self.y.to(*args, **kwargs),
-            adjs_t=[adj_t.to(*args, **kwargs) for adj_t in self.adjs_t],
-        )
-    
-class MAG240M(LightningDataModule):
-    def __init__(self, data_dir: str, batch_size: int, sizes: List[int],
-                 force_regen: bool = True):
-        super().__init__()
-        self.data_dir = data_dir
-        self.batch_size = batch_size
-        self.sizes = sizes
-        self.force_regen = force_regen
-        
-    @property
-    def num_features(self) -> int:
-        return 768
-
-    @property
-    def num_classes(self) -> int:
-        return 153
-
-    def prepare_data(self):
-        dataset = MAG240MDataset(self.data_dir)
-
-        path = f'{dataset.dir}/paper_to_paper_symmetric.pt'
-        if not osp.exists(path) or self.force_regen:
-            t = time.perf_counter()
-            print('Converting adjacency matrix...', end=' ', flush=True) 
-            edge_index = get_part_adjs(dataset) 
-            num_nodes = np.max(edge_index)+1
-            
-            edge_index = torch.from_numpy(edge_index)
-            
-            adj_t = SparseTensor(
-                row=edge_index[0, :], 
-                col=edge_index[1, :],
-                sparse_sizes=(num_nodes, num_nodes))
-            
-            torch.save(adj_t.to_symmetric(), path)
-            print(f'Done! [{time.perf_counter() - t:.2f}s]')
-
-    def setup(self, stage: Optional[str] = None):
-        t = time.perf_counter()
-        print('Reading dataset...', end=' ', flush=True)
-        dataset = MAG240MDataset(self.data_dir)
-
-        self.x = torch.from_numpy(get_part_feats(dataset)).share_memory_()
-        
-        activate_node_labels, node_split = get_part_nodes_split(dataset)
-        self.train_idx = torch.from_numpy(node_split['train']).long().share_memory_()
-        self.val_idx   = torch.from_numpy(node_split['valid']).long().share_memory_()
-        self.test_idx  = torch.from_numpy(node_split['test-dev']).long().share_memory_()
-        self.y = torch.from_numpy(activate_node_labels)
-        
-        path = f'{dataset.dir}/paper_to_paper_symmetric.pt'
-        self.adj_t = torch.load(path).long()
-        print(f'Done! [{time.perf_counter() - t:.2f}s]')
-
-    def train_dataloader(self):
-        return NeighborSampler(self.adj_t, node_idx=self.train_idx,
-                               sizes=self.sizes, return_e_id=False,
-                               transform=self.convert_batch,
-                               batch_size=self.batch_size, shuffle=True,
-                               num_workers=4)
-
-    def val_dataloader(self):
-        return NeighborSampler(self.adj_t, node_idx=self.val_idx,
-                               sizes=self.sizes, return_e_id=False,
-                               transform=self.convert_batch,
-                               batch_size=self.batch_size, num_workers=2)
-
-    def test_dataloader(self):  # Test best validation model once again.
-        return NeighborSampler(self.adj_t, node_idx=self.val_idx,
-                               sizes=self.sizes, return_e_id=False,
-                               transform=self.convert_batch,
-                               batch_size=self.batch_size, num_workers=2)
-
-    def hidden_test_dataloader(self):
-        return NeighborSampler(self.adj_t, node_idx=self.test_idx,
-                               sizes=self.sizes, return_e_id=False,
-                               transform=self.convert_batch,
-                               batch_size=self.batch_size, num_workers=3)
-
-    def convert_batch(self, batch_size, n_id, adjs):
-        x = self.x[n_id].to(torch.float)
-        y = self.y[n_id[:batch_size]].to(torch.long)
-        return Batch(x=x, y=y, adjs_t=[adj_t for adj_t, _, _ in adjs])
-    
-class GNN(LightningModule):
-    def __init__(self, model: str, in_channels: int, out_channels: int,
-                 hidden_channels: int, num_layers: int, heads: int = 4,
-                 dropout: float = 0.5):
-        super().__init__()
-        self.save_hyperparameters()
-        self.model = model.lower()
-        self.dropout = dropout
-
-        self.convs = ModuleList()
-        self.norms = ModuleList()
-        self.skips = ModuleList()
-
-        if self.model == 'gat':
-            self.convs.append(
-                GATConv(in_channels, hidden_channels // heads, heads))
-            self.skips.append(Linear(in_channels, hidden_channels))
-            for _ in range(num_layers - 1):
-                self.convs.append(
-                    GATConv(hidden_channels, hidden_channels // heads, heads))
-                self.skips.append(Linear(hidden_channels, hidden_channels))
-
-        elif self.model == 'graphsage':
-            self.convs.append(SAGEConv(in_channels, hidden_channels))
-            for _ in range(num_layers - 1):
-                self.convs.append(SAGEConv(hidden_channels, hidden_channels))
-
-        for _ in range(num_layers):
-            self.norms.append(BatchNorm1d(hidden_channels))
-
-        self.mlp = Sequential(
-            Linear(hidden_channels, hidden_channels),
-            BatchNorm1d(hidden_channels),
-            ReLU(inplace=True),
-            Dropout(p=self.dropout),
-            Linear(hidden_channels, out_channels),
-        )
-
-        self.train_acc = Accuracy()
-        self.val_acc = Accuracy()
-        self.test_acc = Accuracy()
-
-    def forward(self, x: Tensor, adjs_t: List[SparseTensor]) -> Tensor:
-        for i, adj_t in enumerate(adjs_t):
-            x_target = x[:adj_t.size(0)]
-            x = self.convs[i]((x, x_target), adj_t)
-            if self.model == 'gat':
-                x = x + self.skips[i](x_target)
-                x = F.elu(self.norms[i](x))
-            elif self.model == 'graphsage':
-                x = F.relu(self.norms[i](x))
-            x = F.dropout(x, p=self.dropout, training=self.training)
-
-        return self.mlp(x)
-
-    def training_step(self, batch, batch_idx: int):
-        y_hat = self(batch.x, batch.adjs_t)
-        train_loss = F.cross_entropy(y_hat, batch.y)
-        self.train_acc(y_hat.softmax(dim=-1), batch.y)
-        self.log('train_acc', self.train_acc, prog_bar=True, on_step=False,
-                 on_epoch=True)
-        return train_loss
-
-    def validation_step(self, batch, batch_idx: int):
-        y_hat = self(batch.x, batch.adjs_t)
-        self.val_acc(y_hat.softmax(dim=-1), batch.y)
-        self.log('val_acc', self.val_acc, on_step=False, on_epoch=True,
-                 prog_bar=True, sync_dist=True)
-
-    def test_step(self, batch, batch_idx: int):
-        y_hat = self(batch.x, batch.adjs_t)
-        self.test_acc(y_hat.softmax(dim=-1), batch.y)
-        self.log('test_acc', self.test_acc, on_step=False, on_epoch=True,
-                 prog_bar=True, sync_dist=True)
-
-    def configure_optimizers(self):
-        optimizer = torch.optim.Adam(self.parameters(), lr=0.001)
-        scheduler = StepLR(optimizer, step_size=25, gamma=0.25)
-        return [optimizer], [scheduler]
+ 
     
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
