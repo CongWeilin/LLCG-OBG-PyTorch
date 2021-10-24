@@ -41,7 +41,7 @@ def get_args():
     parser.add_argument('--runs', type=int, default=3)
     ###############################################################
     parser.add_argument('--avg_per_num_epoch', type=int, default=1)
-    parser.add_argument('--num_parts', type=int, default=4)
+    parser.add_argument('--num_parts', type=int, default=16)
     parser.add_argument('--local_steps', type=int, default=50)
     parser.add_argument('--use_cut_edges', action='store_true')
     parser.add_argument('--partition_method', type=int, default=0)
