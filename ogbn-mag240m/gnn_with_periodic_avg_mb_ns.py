@@ -1,6 +1,8 @@
 """
-Code is modified from OGB's official example code 
-https://github.com/snap-stanford/ogb/tree/master/examples/nodeproppred/products
+Run 0: accuracy 66.25
+Run 1: accuracy 66.26
+Run 2: accuracy 66.43
+66.31±0.08
 """
 
 import torch
@@ -247,6 +249,7 @@ def main():
         pickle.dump(log_results, f)
 
     ######### Final Testing ################################
+    print('Evaluation ....')
     eval_loader = NeighborSampler(data.adj_t,
                                   node_idx=data.val_idx,
                                   sizes=[160] * len(args.sizes),
@@ -259,7 +262,7 @@ def main():
         acc_result  = test(model, data.x, data.y, eval_loader, device)
         acc_results.append(acc_result*100)
         print('Run %d: accuracy %.2f'%(run, acc_result*100))
-    print('%.2f $\pm$ %.2f'%(np.mean(acc_results), np.std(acc_results)))
+    print('%.2f ± %.2f'%(np.mean(acc_results), np.std(acc_results)))
 
 if __name__ == "__main__":
     main()
