@@ -181,7 +181,6 @@ def main():
     for run in range(args.runs):
         model.reset_parameters()
         best_valid_acc = -1
-        best_valid_epoch = 0
         ##############################################
         part_model = []
         part_optimizer = []
@@ -259,10 +258,7 @@ def main():
                 if valid_acc > best_valid_acc:
                     torch.save(copy.deepcopy(model).cpu().state_dict(), 'best_valid_model_run_%d_corr.pt'%run)
                     best_valid_acc = valid_acc
-                    best_valid_epoch = epoch
 
-                if epoch > best_valid_epoch + 50:
-                    break
 
         logger.print_statistics(run)        
 
