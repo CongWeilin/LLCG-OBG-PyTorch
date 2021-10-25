@@ -26,7 +26,7 @@ cd ogbn-mag240m
 python gnn_with_periodic_avg_mb_ns.py
 
 # Run periodic parameter averaging with subgraph approximation
-python gnn_with_periodic_avg_mb_ns.py --use_subgraph_approx
+python gnn_with_periodic_avg_mb_ns_subgraph_approx.py
 
 # Run Learn Locally Correct Globally (LLCG)
 python gnn_with_periodic_avg_mb_ns_corr.py

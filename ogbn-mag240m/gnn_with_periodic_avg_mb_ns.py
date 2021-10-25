@@ -1,8 +1,15 @@
 """
+# Without subgraph approx
 Run 0: accuracy 66.25
 Run 1: accuracy 66.26
 Run 2: accuracy 66.43
 66.31±0.08
+
+# With subgraph approx
+Run 0: accuracy 66.60
+Run 1: accuracy 66.27
+Run 2: accuracy 66.20
+66.36 ± 0.18
 """
 
 import torch
@@ -19,7 +26,7 @@ import pickle
 import numpy as np
 import argparse
 ############################################################################################
-from utils.model_avg import model_average, part_model_periodic_avg, model_divergence, assign_model_weight
+from utils.model_avg import model_average, part_model_periodic_avg, model_divergence
 
 from model.gnn_pytorch import GNN
 from utils.data_loader_pytorch import MAG240M, sparse_tensor_to_edge_indices
@@ -45,10 +52,7 @@ def get_args():
     parser.add_argument('--avg_per_num_epoch', type=int, default=1)
     parser.add_argument('--num_parts', type=int, default=16)
     parser.add_argument('--local_steps', type=int, default=20)
-    parser.add_argument('--local_ratio', type=float, default=1.0)
-    parser.add_argument('--correction_steps', type=int, default=1)
     parser.add_argument('--use_cut_edges', action='store_true')
-    parser.add_argument('--use_subgraph_approx', action='store_true')
     ###############################################################
     args = parser.parse_args()
     args.sizes = [int(i) for i in args.sizes.split('-')]
@@ -118,17 +122,9 @@ def main():
     logger = Logger(args.runs, args)
     timer = Timer(args.runs, args.num_parts, args)
 
-    data = MAG240M(ROOT, args.num_parts, args.use_subgraph_approx)
+    data = MAG240M(ROOT, args.num_parts, False)
 
     ##############################################
-    # for server training
-    server_sampler = NeighborSampler(data.adj_t, 
-                                     node_idx=data.train_idx, 
-                                     sizes=args.sizes,
-                                     batch_size=2048, 
-                                     shuffle=True,
-                                     num_workers=4)
-
     # for local training
     if args.use_cut_edges:
         node_idx = [part[train_part] for part, train_part in zip(data.parts, data.train_parts)]
@@ -187,34 +183,32 @@ def main():
         for part_id in range(args.num_parts):
             part_model.append(copy.deepcopy(model))
             part_optimizer.append(torch.optim.Adam(part_model[-1].parameters(), lr=args.lr))
-        server_optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
+
         ##############################################
         for epoch in range(args.epochs):
             # check model divergence to see if method help
             model_dist += [model_divergence(part_model)]
 
-            ###################################################
-            ############ Local Train ##########################
+            ############ Train ##########################
             loss, train_acc = [], []
             epoch_start_time = time.time()
             for part_id in range(args.num_parts):
                 start_t = time.time()
 
-                local_steps = int(args.local_steps * (args.local_ratio**epoch))
                 if args.use_cut_edges:
                     loss_, acc_ = train(part_model[part_id], 
                                         data.x, 
                                         data.y, 
                                         part_optimizer[part_id], device,
                                         local_samplers.samplers[part_id], 
-                                        num_iters=local_steps)
+                                        num_iters=args.local_steps)
                 else:
                     loss_, acc_ = train(part_model[part_id], 
                                         data.x[data.parts[part_id]], 
                                         data.y[data.parts[part_id]], 
                                         part_optimizer[part_id], device,
                                         local_samplers[part_id], 
-                                        num_iters=local_steps)
+                                        num_iters=args.local_steps)
 
                 timer.add_local_time(run, part_id, time.time()-start_t)
                 loss.append(loss_)
@@ -224,26 +218,12 @@ def main():
             train_acc  = sum(train_acc)/len(train_acc)
             print('Epoch: ', epoch, ', Time: ', time.time()-epoch_start_time)
 
-            ###################################################
-            ############ Server Train #########################
-
+            ############ Test ###########################
             if epoch % args.avg_per_num_epoch == 0:    
                 avg_model = model_average(part_model)
-                model = assign_model_weight(avg_model, model)
+                part_model = part_model_periodic_avg(part_model, avg_model)
 
-                start_t = time.time()
-                server_loss, server_acc = train(model, 
-                                                data.x, 
-                                                data.y, 
-                                                server_optimizer, device,
-                                                server_sampler, 
-                                                num_iters=args.correction_steps)
-                timer.add_server_time(run, time.time()-start_t)
-
-                part_model = part_model_periodic_avg(part_model, model)
-
-                ############ Test ###########################
-                valid_acc  = test(model, data.x, data.y, eval_loader, device)
+                valid_acc  = test(avg_model, data.x, data.y, eval_loader, device)
 
                 logger.add_result(run, [train_acc, valid_acc, valid_acc])
 
@@ -251,20 +231,18 @@ def main():
                     f'Epoch: {epoch + 1:02d}, '
                     f'Loss: {loss:.4f}, '
                     f'Train: {100 * train_acc:.2f}%, '
-                    f'Valid: {100 * valid_acc:.2f}% '
-                    f'Server Loss: {server_loss:.4f}, '
-                    f'Server Train: {100 * server_acc:.2f}%')
+                    f'Valid: {100 * valid_acc:.2f}% ')
                 
                 if valid_acc > best_valid_acc:
                     torch.save(avg_model.cpu().state_dict(),
-                            'best_valid_model_run_%d_corr.pt'%run)
+                            'best_valid_model_run_%d.pt'%run)
                     best_valid_acc = valid_acc
 
         logger.print_statistics(run)        
 
     logger.print_statistics()
 
-    res_id = 'mb_ns_w_cut_edge_corr' if args.use_cut_edges else 'mb_ns_wo_cut_edge_corr'
+    res_id = 'mb_ns_w_cut_edge' if args.use_cut_edges else 'mb_ns_wo_cut_edge'
 
     log_results = {
         'args': args,
@@ -273,7 +251,7 @@ def main():
         'time': timer.local_time
     }
 
-    with open('log_results_%s_corr.pkl' % res_id, 'wb') as f:
+    with open('log_results_%s.pkl' % res_id, 'wb') as f:
         pickle.dump(log_results, f)
 
     ######### Final Testing ################################
@@ -286,7 +264,7 @@ def main():
                                   num_workers=4)
     acc_results = []
     for run in range(args.runs):
-        model.load_state_dict(torch.load('best_valid_model_run_%d_corr.pt'%run))
+        model.load_state_dict(torch.load('best_valid_model_run_%d.pt'%run))
         acc_result  = test(model, data.x, data.y, eval_loader, device)
         acc_results.append(acc_result*100)
         print('Run %d: accuracy %.2f'%(run, acc_result*100))
