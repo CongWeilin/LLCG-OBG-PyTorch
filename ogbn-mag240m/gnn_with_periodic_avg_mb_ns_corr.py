@@ -1,8 +1,8 @@
 """
-Run 0: accuracy 66.25
-Run 1: accuracy 66.26
-Run 2: accuracy 66.43
-66.31±0.08
+Run 0: accuracy 69.70
+Run 1: accuracy 69.84
+Run 2: accuracy 69.68
+69.74 ± 0.07
 """
 
 import torch
